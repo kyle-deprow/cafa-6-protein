@@ -37,6 +37,10 @@ dev = [
     "pandas-stubs>=2.1.0",
     "pre-commit>=3.6.0",
 ]
+classifier = [
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -91,12 +95,19 @@ module = [
     "networkx.*",
     "faiss.*",
     "ahocorasick.*",
+    "torch.*",
+    "transformers.*",
+    "tqdm.*",
 ]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "cafa_6_protein.cli"
 disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = "cafa_6_protein.literature.*"
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

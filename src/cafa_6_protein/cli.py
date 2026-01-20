@@ -1654,6 +1654,315 @@ def info() -> None:
         console.print(f"[dim]IA weights:[/dim] {len(ia_df):,} terms")
 
 
+# ============================================================================
+# Literature Classifier Commands
+# ============================================================================
+
+
+@app.command(name="lit-prepare")
+def lit_classifier_prepare(
+    data_dir: Annotated[
+        Path,
+        typer.Option(
+            "--data-dir",
+            "-d",
+            help="Data directory containing training data and caches",
+        ),
+    ] = Path("data"),
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output parquet file for training data",
+        ),
+    ] = Path("data/classifier_training.parquet"),
+    neg_sample_ratio: Annotated[
+        float,
+        typer.Option(
+            "--neg-ratio",
+            help="Fraction of negative examples to keep",
+        ),
+    ] = 0.3,
+    min_ic: Annotated[
+        float,
+        typer.Option(
+            "--min-ic",
+            help="Minimum IC for GO terms to include",
+        ),
+    ] = 0.0,
+    max_proteins: Annotated[
+        int | None,
+        typer.Option(
+            "--max-proteins",
+            help="Maximum proteins to process (for testing)",
+        ),
+    ] = None,
+) -> None:
+    """Prepare training data for the literature GO term classifier.
+
+    Extracts positive/negative examples from abstracts by comparing
+    extracted GO terms with actual annotations.
+    """
+    import pandas as pd
+
+    from cafa_6_protein.literature.dataset import prepare_training_data, save_training_data
+    from cafa_6_protein.pubmed import AbstractCache, GOExtractor, PublicationCache
+
+    console.print(Panel("Prepare Classifier Training Data", style="bold"))
+
+    # Check required files
+    train_terms = data_dir / "Train" / "train_terms.tsv"
+    ontology_file = data_dir / "Train" / "go-basic.obo"
+    publications_file = data_dir / "publications.parquet"
+    abstracts_file = data_dir / "abstracts.db"
+    ia_file = data_dir / "IA.tsv"
+
+    for f in [train_terms, ontology_file, publications_file, abstracts_file]:
+        if not f.exists():
+            console.print(f"[red]Missing required file: {f}[/red]")
+            raise typer.Exit(1)
+
+    # Load data
+    console.print("[dim]Loading annotations...[/dim]")
+    annotations = pd.read_csv(train_terms, sep="\t")
+    annotations = annotations.rename(columns={"EntryID": "protein_id", "term": "go_term"})
+    console.print(
+        f"  {len(annotations):,} annotations for {annotations['protein_id'].nunique():,} proteins"
+    )
+
+    console.print("[dim]Loading caches...[/dim]")
+    pub_cache = PublicationCache(data_dir)
+    abs_cache = AbstractCache(data_dir)
+    go_extractor = GOExtractor.from_obo(ontology_file)
+
+    # Load IC values
+    ic_values: dict[str, float] = {}
+    if ia_file.exists():
+        with ia_file.open() as ia_fh:
+            for line in ia_fh:
+                parts = line.strip().split("\t")
+                if len(parts) == 2:
+                    ic_values[parts[0]] = float(parts[1])
+        console.print(f"  Loaded IC for {len(ic_values):,} GO terms")
+
+    # Prepare training data
+    console.print("[dim]Extracting training examples...[/dim]")
+    examples = prepare_training_data(
+        annotations=annotations,
+        publication_cache=pub_cache,
+        abstract_cache=abs_cache,
+        go_extractor=go_extractor,
+        ic_values=ic_values,
+        neg_sample_ratio=neg_sample_ratio,
+        min_ic=min_ic,
+        max_proteins=max_proteins,
+    )
+
+    # Count by label
+    n_pos = sum(1 for ex in examples if ex.label == 1)
+    n_neg = len(examples) - n_pos
+
+    console.print(f"  Positive examples: {n_pos:,}")
+    console.print(f"  Negative examples: {n_neg:,}")
+    console.print(f"  Ratio: {n_neg / max(1, n_pos):.1f}:1")
+
+    # Save
+    save_training_data(examples, output)
+    console.print(f"[green]Saved training data to {output}[/green]")
+
+
+@app.command(name="lit-train")
+def lit_classifier_train(
+    data_file: Annotated[
+        Path,
+        typer.Option(
+            "--data",
+            "-d",
+            help="Training data parquet file",
+        ),
+    ] = Path("data/classifier_training.parquet"),
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for trained model",
+        ),
+    ] = Path("models/go_relevance_classifier"),
+    epochs: Annotated[
+        int,
+        typer.Option(
+            "--epochs",
+            "-e",
+            help="Number of training epochs",
+        ),
+    ] = 3,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            "--batch-size",
+            "-b",
+            help="Training batch size",
+        ),
+    ] = 32,
+    freeze_layers: Annotated[
+        int,
+        typer.Option(
+            "--freeze-layers",
+            help="Number of encoder layers to freeze",
+        ),
+    ] = 10,
+    learning_rate: Annotated[
+        float,
+        typer.Option(
+            "--lr",
+            help="Learning rate",
+        ),
+    ] = 2e-5,
+) -> None:
+    """Train the GO term relevance classifier.
+
+    Uses PubMedBERT to learn which extracted GO terms are true annotations.
+    """
+    from cafa_6_protein.literature.classifier import GORelevanceClassifier
+    from cafa_6_protein.literature.dataset import ClassifierDataset, load_training_data
+    from cafa_6_protein.literature.schemas import ClassifierConfig
+
+    console.print(Panel("Train GO Relevance Classifier", style="bold"))
+
+    if not data_file.exists():
+        console.print(f"[red]Training data not found: {data_file}[/red]")
+        console.print("[dim]Run 'cafa6 lit-prepare' first to generate training data.[/dim]")
+        raise typer.Exit(1)
+
+    # Load data
+    console.print("[dim]Loading training data...[/dim]")
+    examples = load_training_data(data_file)
+    dataset = ClassifierDataset(examples)
+
+    # Split
+    console.print("[dim]Splitting data...[/dim]")
+    train_dataset, val_dataset, test_dataset = dataset.split()
+    console.print(f"  Train: {len(train_dataset):,} examples")
+    console.print(f"  Val: {len(val_dataset):,} examples")
+    console.print(f"  Test: {len(test_dataset):,} examples")
+
+    # Get class weights
+    n_pos, n_neg, pos_weight = train_dataset.get_class_weights()
+    console.print(f"  Class balance: {n_pos:,} pos, {n_neg:,} neg (weight: {pos_weight:.1f})")
+
+    # Create classifier
+    config = ClassifierConfig(
+        epochs=epochs,
+        batch_size=batch_size,
+        freeze_layers=freeze_layers,
+        learning_rate=learning_rate,
+        pos_weight=min(pos_weight, 20.0),  # Cap weight
+    )
+
+    console.print("\n[dim]Configuration:[/dim]")
+    console.print(f"  Model: {config.base_model}")
+    console.print(f"  Freeze layers: {config.freeze_layers}")
+    console.print(f"  Epochs: {config.epochs}")
+    console.print(f"  Batch size: {config.batch_size}")
+    console.print(f"  Learning rate: {config.learning_rate}")
+
+    classifier = GORelevanceClassifier(config=config)
+
+    # Train
+    console.print("\n[bold]Training...[/bold]")
+    _history = classifier.train(
+        train_examples=train_dataset.examples,
+        val_examples=val_dataset.examples,
+        pos_weight=config.pos_weight,
+    )
+
+    # Evaluate on test set
+    console.print("\n[dim]Evaluating on test set...[/dim]")
+    test_metrics = classifier.evaluate(test_dataset.examples)
+
+    table = Table(title="Test Set Results")
+    table.add_column("Metric")
+    table.add_column("Value")
+    table.add_row("Precision", f"{test_metrics['precision']:.3f}")
+    table.add_row("Recall", f"{test_metrics['recall']:.3f}")
+    table.add_row("F1", f"{test_metrics['f1']:.3f}")
+    console.print(table)
+
+    # Save model
+    classifier.save(output_dir)
+    console.print(f"\n[green]Model saved to {output_dir}[/green]")
+
+
+@app.command(name="lit-evaluate")
+def lit_classifier_evaluate(
+    model_dir: Annotated[
+        Path,
+        typer.Option(
+            "--model",
+            "-m",
+            help="Trained model directory",
+        ),
+    ] = Path("models/go_relevance_classifier"),
+    data_file: Annotated[
+        Path,
+        typer.Option(
+            "--data",
+            "-d",
+            help="Test data parquet file",
+        ),
+    ] = Path("data/classifier_training.parquet"),
+) -> None:
+    """Evaluate the trained GO term relevance classifier.
+
+    Reports precision/recall/F1 at various thresholds.
+    """
+    from cafa_6_protein.literature.classifier import GORelevanceClassifier
+    from cafa_6_protein.literature.dataset import ClassifierDataset, load_training_data
+
+    console.print(Panel("Evaluate GO Relevance Classifier", style="bold"))
+
+    if not model_dir.exists():
+        console.print(f"[red]Model not found: {model_dir}[/red]")
+        raise typer.Exit(1)
+
+    if not data_file.exists():
+        console.print(f"[red]Data file not found: {data_file}[/red]")
+        raise typer.Exit(1)
+
+    # Load model
+    console.print("[dim]Loading model...[/dim]")
+    classifier = GORelevanceClassifier.load(model_dir)
+
+    # Load data and get test split
+    console.print("[dim]Loading data...[/dim]")
+    examples = load_training_data(data_file)
+    dataset = ClassifierDataset(examples)
+    _, _, test_dataset = dataset.split()
+    console.print(f"  Test set: {len(test_dataset):,} examples")
+
+    # Evaluate at multiple thresholds
+    console.print("\n[dim]Evaluating at multiple thresholds...[/dim]")
+
+    table = Table(title="Threshold Analysis")
+    table.add_column("Threshold")
+    table.add_column("Precision")
+    table.add_column("Recall")
+    table.add_column("F1")
+
+    for threshold in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]:
+        metrics = classifier.evaluate(test_dataset.examples, threshold=threshold)
+        table.add_row(
+            f"{threshold:.1f}",
+            f"{metrics['precision']:.3f}",
+            f"{metrics['recall']:.3f}",
+            f"{metrics['f1']:.3f}",
+        )
+
+    console.print(table)
+
+
 def main() -> None:
     """Entry point for CLI."""
     app()
