@@ -225,6 +225,8 @@ class AbstractCache:
         abstract: str,
         pub_year: int | None,
         journal: str | None,
+        *,
+        commit: bool = True,
     ) -> None:
         """Add an abstract to the cache.
 
@@ -234,6 +236,7 @@ class AbstractCache:
             abstract: Abstract text.
             pub_year: Publication year.
             journal: Journal name.
+            commit: Whether to commit immediately (set False for batching).
         """
         conn = self._get_conn()
         conn.execute(
@@ -251,6 +254,65 @@ class AbstractCache:
             """,
             (pmid,),
         )
+        if commit:
+            conn.commit()
+
+    def add_abstracts_batch(
+        self,
+        abstracts: list[AbstractData],
+    ) -> None:
+        """Add multiple abstracts in a single transaction.
+
+        More efficient than individual add_abstract calls.
+
+        Args:
+            abstracts: List of AbstractData to add.
+        """
+        if not abstracts:
+            return
+
+        conn = self._get_conn()
+        for data in abstracts:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO abstracts
+                    (pmid, title, abstract, pub_year, journal, fetched_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (data.pmid, data.title, data.abstract, data.pub_year, data.journal),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO fetch_status (pmid, status, checked_at)
+                VALUES (?, 'success', CURRENT_TIMESTAMP)
+                """,
+                (data.pmid,),
+            )
+        conn.commit()
+
+    def mark_not_found_batch(self, pmids: list[str]) -> None:
+        """Mark multiple PMIDs as not found in a single transaction.
+
+        Args:
+            pmids: List of PMIDs that were not found.
+        """
+        if not pmids:
+            return
+
+        conn = self._get_conn()
+        for pmid in pmids:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO fetch_status (pmid, status, error_msg, checked_at)
+                VALUES (?, 'not_found', NULL, CURRENT_TIMESTAMP)
+                """,
+                (pmid,),
+            )
+        conn.commit()
+
+    def commit(self) -> None:
+        """Manually commit pending changes."""
+        conn = self._get_conn()
         conn.commit()
 
     def get_abstract(self, pmid: str) -> AbstractData | None:

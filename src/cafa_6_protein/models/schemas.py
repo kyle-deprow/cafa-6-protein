@@ -63,6 +63,14 @@ class AggregationConfig(BaseModel):
         default=True, description="Whether to propagate to GO ancestors"
     )
     k: int = Field(default=50, ge=1, le=1000, description="Number of neighbors")
+    min_literature_ic: float = Field(
+        default=2.0, ge=0.0, description="Minimum IC for literature-extracted terms"
+    )
+    weight_by_ic: bool = Field(default=True, description="Whether to weight literature terms by IC")
+    literature_namespaces: frozenset[str] = Field(
+        default=frozenset(["CC"]),
+        description="GO namespaces to use for literature extraction (CC, MF, BP)",
+    )
 
     model_config = {"frozen": True}
 

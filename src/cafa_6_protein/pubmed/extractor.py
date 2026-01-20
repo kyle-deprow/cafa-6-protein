@@ -26,6 +26,38 @@ NAMESPACE_MAP = {
     "cellular_component": "CC",
 }
 
+# Default minimum pattern length to avoid short abbreviations matching everywhere
+DEFAULT_MIN_PATTERN_LENGTH = 5
+
+# Overly generic terms that match too broadly in scientific text
+# These are typically very high-level GO terms or common English words
+GENERIC_STOPWORDS = frozenset(
+    [
+        # Very generic single-word terms
+        "binding",
+        "membrane",
+        "activity",
+        "process",
+        "signaling",
+        "growth",
+        "response",
+        "regulation",
+        "transport",
+        "cell",
+        "protein",
+        "development",
+        # Common words that happen to be GO terms
+        "nucleus",
+        "cytoplasm",
+        "receptor",
+        "complex",
+        "localization",
+        "assembly",
+        "organization",
+        "modification",
+    ]
+)
+
 
 class GODictionary:
     """Dictionary for GO term lookup and extraction.
@@ -38,31 +70,55 @@ class GODictionary:
         name_index: Dict mapping normalized names to GO IDs.
         _automaton: Aho-Corasick automaton for fast matching.
         _pattern_to_go: Mapping from pattern index to GO IDs.
+        min_pattern_length: Minimum length for patterns to include.
+        use_stopwords: Whether to filter out generic stopwords.
     """
 
-    def __init__(self) -> None:
-        """Initialize empty dictionary."""
+    def __init__(
+        self,
+        min_pattern_length: int = DEFAULT_MIN_PATTERN_LENGTH,
+        use_stopwords: bool = True,
+    ) -> None:
+        """Initialize empty dictionary.
+
+        Args:
+            min_pattern_length: Minimum characters for a pattern to be indexed.
+            use_stopwords: Whether to filter out generic stopwords.
+        """
         self.terms: dict[str, GOTermInfo] = {}
         self.name_index: dict[str, set[str]] = {}
         self._automaton: ahocorasick_rs.AhoCorasick | None = None
         self._patterns: list[str] = []
         self._pattern_to_go: list[set[str]] = []
+        self.min_pattern_length = min_pattern_length
+        self.use_stopwords = use_stopwords
+        self._filtered_count = 0
 
     def __len__(self) -> int:
         """Return number of terms in dictionary."""
         return len(self.terms)
 
     @classmethod
-    def from_obo(cls, obo_path: Path | str) -> GODictionary:
+    def from_obo(
+        cls,
+        obo_path: Path | str,
+        min_pattern_length: int = DEFAULT_MIN_PATTERN_LENGTH,
+        use_stopwords: bool = True,
+    ) -> GODictionary:
         """Build dictionary from OBO file.
 
         Args:
             obo_path: Path to GO OBO file.
+            min_pattern_length: Minimum characters for patterns (filters abbreviations).
+            use_stopwords: Whether to filter out generic stopwords.
 
         Returns:
             Populated GODictionary.
         """
-        dictionary = cls()
+        dictionary = cls(
+            min_pattern_length=min_pattern_length,
+            use_stopwords=use_stopwords,
+        )
         obo_path = Path(obo_path)
 
         logger.info(f"Loading GO terms from {obo_path}")
@@ -110,7 +166,11 @@ class GODictionary:
                     current_term.get("synonyms", []),
                 )
 
-        logger.info(f"Loaded {len(dictionary)} GO terms")
+        logger.info(
+            f"Loaded {len(dictionary)} GO terms, "
+            f"{len(dictionary.name_index)} indexed patterns "
+            f"(filtered {dictionary._filtered_count} short/generic patterns)"
+        )
 
         # Build Aho-Corasick automaton for fast matching
         dictionary.build_automaton()
@@ -138,18 +198,43 @@ class GODictionary:
             synonyms=synonyms or [],
         )
 
-        # Index by name
+        # Index by name (if not filtered)
         normalized = name.lower()
-        if normalized not in self.name_index:
-            self.name_index[normalized] = set()
-        self.name_index[normalized].add(go_id)
-
-        # Index by synonyms
-        for syn in synonyms or []:
-            normalized = syn.lower()
+        if self._should_index_pattern(normalized):
             if normalized not in self.name_index:
                 self.name_index[normalized] = set()
             self.name_index[normalized].add(go_id)
+        else:
+            self._filtered_count += 1
+
+        # Index by synonyms (if not filtered)
+        for syn in synonyms or []:
+            normalized = syn.lower()
+            if self._should_index_pattern(normalized):
+                if normalized not in self.name_index:
+                    self.name_index[normalized] = set()
+                self.name_index[normalized].add(go_id)
+            else:
+                self._filtered_count += 1
+
+    def _should_index_pattern(self, pattern: str) -> bool:
+        """Check if a pattern should be indexed based on filtering rules.
+
+        Args:
+            pattern: Lowercased pattern to check.
+
+        Returns:
+            True if pattern should be indexed.
+        """
+        # Filter by minimum length
+        if len(pattern) < self.min_pattern_length:
+            return False
+
+        # Filter stopwords
+        if self.use_stopwords and pattern in GENERIC_STOPWORDS:
+            return False
+
+        return True
 
     def lookup(self, text: str) -> set[str]:
         """Lookup GO IDs for a term name or synonym.
@@ -290,16 +375,27 @@ class GOExtractor:
         self.dictionary = dictionary
 
     @classmethod
-    def from_obo(cls, obo_path: Path | str) -> GOExtractor:
+    def from_obo(
+        cls,
+        obo_path: Path | str,
+        min_pattern_length: int = DEFAULT_MIN_PATTERN_LENGTH,
+        use_stopwords: bool = True,
+    ) -> GOExtractor:
         """Create extractor from OBO file.
 
         Args:
             obo_path: Path to GO OBO file.
+            min_pattern_length: Minimum characters for patterns (filters abbreviations).
+            use_stopwords: Whether to filter out generic stopwords.
 
         Returns:
             Initialized GOExtractor.
         """
-        dictionary = GODictionary.from_obo(obo_path)
+        dictionary = GODictionary.from_obo(
+            obo_path,
+            min_pattern_length=min_pattern_length,
+            use_stopwords=use_stopwords,
+        )
         return cls(dictionary)
 
     def extract(self, text: str) -> set[str]:

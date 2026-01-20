@@ -64,6 +64,7 @@ def convert_distance_to_similarity(
 def aggregate_scores(
     evidence_list: list[NeighborEvidence],
     config: AggregationConfig | None = None,
+    ic_values: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Aggregate scores from multiple neighbor evidence sources.
 
@@ -74,11 +75,14 @@ def aggregate_scores(
     Score formula:
         score(term) = sum over neighbors of:
             alpha * similarity * (1 if term in go_terms else 0) +
-            (1-alpha) * similarity * discount * (1 if term in literature_terms else 0)
+            (1-alpha) * similarity * discount * ic_weight * (1 if term in literature_terms else 0)
+
+    Where ic_weight = normalized_ic(term) if weight_by_ic else 1.0
 
     Args:
         evidence_list: List of NeighborEvidence from kNN retrieval.
         config: Aggregation configuration.
+        ic_values: Optional IC values for weighting literature terms.
 
     Returns:
         Dictionary mapping GO terms to aggregated scores.
@@ -87,6 +91,9 @@ def aggregate_scores(
         config = AggregationConfig()
 
     scores: dict[str, float] = defaultdict(float)
+
+    # Compute IC normalization factor for weighting (max IC ~ 10-15)
+    max_ic = 10.0  # Reasonable upper bound for normalization
 
     for evidence in evidence_list:
         sim = evidence.similarity
@@ -97,7 +104,13 @@ def aggregate_scores(
 
         # Literature-based scores (from abstract extraction)
         for go_term in evidence.literature_terms:
-            scores[go_term] += (1 - config.alpha) * sim * config.literature_discount
+            ic_weight = 1.0
+            if config.weight_by_ic and ic_values:
+                # Normalize IC to [0, 1] range and use as weight
+                ic = ic_values.get(go_term, 0.0)
+                ic_weight = min(ic / max_ic, 1.0)
+
+            scores[go_term] += (1 - config.alpha) * sim * config.literature_discount * ic_weight
 
     # Normalize to [0, 1] if requested
     if config.normalize_scores and scores:
@@ -192,6 +205,12 @@ class RetrievalAugmentedPredictor:
         self._abstract_cache: AbstractCache | None = None
         self._go_extractor: GOExtractor | None = None
 
+        # Information content for filtering/weighting literature terms
+        self._ic_values: dict[str, float] = {}
+
+        # GO terms by namespace for filtering (populated from extractor dictionary)
+        self._terms_by_namespace: dict[str, set[str]] = {}
+
         # Optional ontology for propagation
         self._ontology: nx.DiGraph | None = None
 
@@ -214,6 +233,34 @@ class RetrievalAugmentedPredictor:
         self._publication_cache = publication_cache
         self._abstract_cache = abstract_cache
         self._go_extractor = go_extractor
+
+        # Build namespace index from extractor dictionary
+        self._terms_by_namespace = {
+            ns: go_extractor.dictionary.get_terms_by_namespace(ns) for ns in ["BP", "MF", "CC"]
+        }
+        logger.info(
+            f"Literature namespace filter: {self.config.literature_namespaces}, "
+            f"terms: BP={len(self._terms_by_namespace.get('BP', set()))}, "
+            f"MF={len(self._terms_by_namespace.get('MF', set()))}, "
+            f"CC={len(self._terms_by_namespace.get('CC', set()))}"
+        )
+
+        return self
+
+    def set_ic_values(self, ic_values: dict[str, float]) -> RetrievalAugmentedPredictor:
+        """Set Information Content values for filtering literature terms.
+
+        Terms with IC below config.min_literature_ic will be filtered out.
+        If config.weight_by_ic is True, literature scores are weighted by IC.
+
+        Args:
+            ic_values: Dictionary mapping GO term IDs to IC values.
+
+        Returns:
+            Self for method chaining.
+        """
+        self._ic_values = ic_values
+        logger.info(f"Set IC values for {len(ic_values)} GO terms")
         return self
 
     def set_ontology(self, ontology: nx.DiGraph) -> RetrievalAugmentedPredictor:
@@ -362,11 +409,13 @@ class RetrievalAugmentedPredictor:
     def _extract_literature_terms(self, pmids: set[str]) -> set[str]:
         """Extract GO terms from abstracts for given PMIDs.
 
+        Filters terms by minimum IC threshold if IC values are set.
+
         Args:
             pmids: Set of PubMed IDs.
 
         Returns:
-            Set of extracted GO terms.
+            Set of extracted GO terms (filtered by IC if configured).
         """
         if not self._abstract_cache or not self._go_extractor:
             return set()
@@ -380,6 +429,18 @@ class RetrievalAugmentedPredictor:
                 abstract = abstract_data.abstract or ""
                 extracted = self._go_extractor.extract_from_abstract(title, abstract)
                 terms.update(extracted)
+
+        # Filter by namespace if configured
+        if self.config.literature_namespaces and self._terms_by_namespace:
+            allowed_terms: set[str] = set()
+            for ns in self.config.literature_namespaces:
+                allowed_terms.update(self._terms_by_namespace.get(ns, set()))
+            terms = terms & allowed_terms
+
+        # Filter by IC threshold if IC values are available
+        if self._ic_values and self.config.min_literature_ic > 0:
+            min_ic = self.config.min_literature_ic
+            terms = {t for t in terms if self._ic_values.get(t, 0.0) >= min_ic}
 
         return terms
 
@@ -403,8 +464,12 @@ class RetrievalAugmentedPredictor:
         # Build evidence
         evidence_list = self.build_evidence(distances, indices)
 
-        # Aggregate scores
-        term_scores = aggregate_scores(evidence_list, self.config)
+        # Aggregate scores (pass IC values for weighting if available)
+        term_scores = aggregate_scores(
+            evidence_list,
+            self.config,
+            ic_values=self._ic_values if self._ic_values else None,
+        )
 
         # Propagate to ancestors if ontology is available
         if self.config.propagate_ancestors and self._ontology is not None:

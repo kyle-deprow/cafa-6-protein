@@ -503,7 +503,7 @@ def cv(
     console.print("[dim]Loading training annotations...[/dim]")
     train_df = pd.read_csv(train_terms, sep="\t")
     train_df = train_df.rename(columns={"EntryID": "protein_id", "term": "go_term"})
-    all_proteins = train_df["protein_id"].unique()
+    all_proteins = sorted(train_df["protein_id"].unique())  # Sort for deterministic order
     console.print(f"  Loaded {len(train_df):,} annotations for {len(all_proteins):,} proteins")
 
     # Split proteins
@@ -851,11 +851,11 @@ def cv_retrieval(
     proteins_with_embeddings = set(all_proteins) & set(embedding_protein_ids)
     console.print(f"  Proteins with embeddings: {len(proteins_with_embeddings):,}")
 
-    # Split proteins
+    # Split proteins (sort first for deterministic order!)
     console.print(
         f"[dim]Splitting proteins ({1-val_fraction:.0%} train / {val_fraction:.0%} val)...[/dim]"
     )
-    protein_list = list(proteins_with_embeddings)
+    protein_list = sorted(proteins_with_embeddings)  # Sort for deterministic order
     np.random.seed(seed)
     np.random.shuffle(protein_list)
     n_val = int(len(protein_list) * val_fraction)
@@ -892,6 +892,18 @@ def cv_retrieval(
     predictor = RetrievalAugmentedPredictor(k=k, config=config)
     predictor.set_ontology(ontology)
 
+    # Load IC values for filtering/weighting literature terms
+    ia_file = data_dir / "IA.tsv"
+    if ia_file.exists():
+        ic_values = {}
+        with ia_file.open() as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) == 2:
+                    ic_values[parts[0]] = float(parts[1])
+        predictor.set_ic_values(ic_values)
+        console.print(f"  [dim]Loaded IC values for {len(ic_values):,} GO terms[/dim]")
+
     # Set up literature enrichment if requested
     if use_literature:
         from cafa_6_protein.pubmed import AbstractCache, GOExtractor, PublicationCache
@@ -905,6 +917,7 @@ def cv_retrieval(
             go_extractor = GOExtractor.from_obo(ontology_file)
             predictor.set_literature_enrichment(pub_cache, abs_cache, go_extractor)
             console.print("  [green]Literature enrichment enabled[/green]")
+            console.print(f"  [dim]  Min IC threshold: {config.min_literature_ic}[/dim]")
         else:
             console.print("  [yellow]Literature caches not found, disabled[/yellow]")
 
@@ -913,32 +926,7 @@ def cv_retrieval(
     predictor.fit(train_embeddings, train_annot)
     console.print(f"  Fitted with {len(train_embeddings):,} training proteins")
 
-    # Generate predictions for validation set
-    console.print("[dim]Generating predictions for validation set...[/dim]")
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("({task.completed}/{task.total})"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Predicting", total=len(val_proteins))
-
-        predictions_list = []
-        for pid, embedding in val_embeddings.items():
-            preds = predictor.predict_one(pid, embedding)
-            predictions_list.append(preds)
-            progress.advance(task)
-
-    predictions = pd.concat(predictions_list, ignore_index=True)
-    console.print(
-        f"  Generated {len(predictions):,} predictions for {len(val_proteins):,} proteins"
-    )
-    console.print(f"  Unique GO terms: {predictions['go_term'].nunique():,}")
-
-    # Create temp directory for evaluation
+    # Create temp directory for evaluation (before prediction to stream to disk)
     with tempfile.TemporaryDirectory() as tmpdir_str:
         tmpdir = Path(tmpdir_str)
         pred_dir = tmpdir / "predictions"
@@ -947,16 +935,37 @@ def cv_retrieval(
         gt_file = tmpdir / "ground_truth.tsv"
         out_dir = tmpdir / "results"
 
-        # Write predictions
-        console.print("[dim]Writing predictions to temp file...[/dim]")
-        predictions.to_csv(
-            pred_file,
-            sep="\t",
-            index=False,
-            header=False,
-            columns=["protein_id", "go_term", "score"],
+        # Generate predictions and stream directly to disk (memory efficient)
+        console.print("[dim]Generating predictions (streaming to disk)...[/dim]")
+        total_predictions = 0
+        unique_terms: set[str] = set()
+
+        with (
+            pred_file.open("w") as f,
+            Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("({task.completed}/{task.total})"),
+                console=console,
+            ) as progress,
+        ):
+            task = progress.add_task("Predicting", total=len(val_proteins))
+
+            for pid, embedding in val_embeddings.items():
+                preds = predictor.predict_one(pid, embedding)
+                # Write directly to file instead of accumulating in memory
+                for _, row in preds.iterrows():
+                    f.write(f"{row['protein_id']}\t{row['go_term']}\t{row['score']:.6f}\n")
+                    unique_terms.add(row["go_term"])
+                    total_predictions += 1
+                    progress.advance(task)
+
+        console.print(
+            f"  Generated {total_predictions:,} predictions for {len(val_proteins):,} proteins"
         )
-        console.print(f"  Wrote {len(predictions):,} predictions")
+        console.print(f"  Unique GO terms: {len(unique_terms):,}")
 
         # Write ground truth
         console.print("[dim]Writing ground truth...[/dim]")
@@ -1229,7 +1238,12 @@ def pubmed(
                 def update_abstract_progress(fetched: int, _total: int) -> None:
                     progress.update(task, completed=fetched)
 
-                ncbi.fetch_abstracts(pmids_to_fetch, progress_callback=update_abstract_progress)
+                # Use streaming mode to avoid memory bloat
+                ncbi.fetch_abstracts(
+                    pmids_to_fetch,
+                    progress_callback=update_abstract_progress,
+                    return_results=False,  # Don't keep abstracts in memory
+                )
 
             abstract_stats = ncbi.stats()
             console.print(f"\n[green]✓[/green] Cached {abstract_stats.total_abstracts:,} abstracts")
@@ -1544,36 +1558,40 @@ def predict_cmd(
 
     console.print(f"[dim]Proteins with embeddings:[/dim] {len(test_embeddings):,}")
 
-    # Generate predictions
-    console.print("\n[bold]Generating predictions...[/bold]")
+    # Generate predictions (stream directly to file for memory efficiency)
+    console.print("\n[bold]Generating predictions (streaming to disk)...[/bold]")
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("({task.completed}/{task.total})"),
-        TimeRemainingColumn(),
-        console=console,
-    ) as progress:
+    total_predictions = 0
+    unique_terms: set[str] = set()
+    unique_proteins: set[str] = set()
+
+    with (
+        output.open("w") as f,
+        Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress,
+    ):
         task = progress.add_task("Predicting", total=len(test_embeddings))
 
-        predictions_list = []
         for pid, embedding in test_embeddings.items():
             preds = predictor.predict_one(pid, embedding)
-            predictions_list.append(preds)
-            progress.advance(task)
+            # Stream to disk instead of accumulating in memory
+            for _, row in preds.iterrows():
+                f.write(f"{row['protein_id']}\t{row['go_term']}\t{row['score']:.6f}\n")
+                unique_terms.add(row["go_term"])
+                unique_proteins.add(row["protein_id"])
+                total_predictions += 1
+                progress.advance(task)
 
-    import pandas as pd
-
-    predictions = pd.concat(predictions_list, ignore_index=True)
-
-    console.print(f"\n[green]✓[/green] Generated {len(predictions):,} predictions")
-    console.print(f"[dim]Unique proteins:[/dim] {predictions['protein_id'].nunique():,}")
-    console.print(f"[dim]Unique GO terms:[/dim] {predictions['go_term'].nunique():,}")
-
-    # Save predictions
-    predictions.to_csv(output, sep="\t", index=False, header=False)
+    console.print(f"\n[green]✓[/green] Generated {total_predictions:,} predictions")
+    console.print(f"[dim]Unique proteins:[/dim] {len(unique_proteins):,}")
+    console.print(f"[dim]Unique GO terms:[/dim] {len(unique_terms):,}")
     console.print(f"[green]✓[/green] Saved to {output}")
 
 

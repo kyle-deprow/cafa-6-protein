@@ -179,6 +179,8 @@ class NCBIClient:
         self,
         pmids: list[str],
         progress_callback: Callable[[int, int], None] | None = None,
+        *,
+        return_results: bool = True,
     ) -> dict[str, AbstractData]:
         """Fetch abstracts for PMIDs.
 
@@ -187,20 +189,22 @@ class NCBIClient:
         Args:
             pmids: List of PMIDs.
             progress_callback: Optional callback(fetched, total) for progress.
+            return_results: If False, don't accumulate results in memory (saves RAM).
 
         Returns:
-            Dict mapping PMIDs to AbstractData.
+            Dict mapping PMIDs to AbstractData (empty if return_results=False).
         """
         if not pmids:
             return {}
 
         result: dict[str, AbstractData] = {}
 
-        # Get cached abstracts
-        for pmid in pmids:
-            cached = self.cache.get_abstract(pmid)
-            if cached:
-                result[pmid] = cached
+        # Get cached abstracts only if we need to return results
+        if return_results:
+            for pmid in pmids:
+                cached = self.cache.get_abstract(pmid)
+                if cached:
+                    result[pmid] = cached
 
         # Find missing PMIDs (not cached and not marked as not-found)
         missing = self.cache.get_missing_pmids(pmids)
@@ -219,21 +223,17 @@ class NCBIClient:
             try:
                 batch_result = self._fetch_batch(batch)
 
-                # Update cache and result
-                for pmid, data in batch_result.items():
-                    self.cache.add_abstract(
-                        pmid,
-                        data.title,
-                        data.abstract,
-                        data.pub_year,
-                        data.journal,
-                    )
-                    result[pmid] = data
+                # Batch insert to cache (much faster than individual inserts)
+                abstracts_to_cache = list(batch_result.values())
+                self.cache.add_abstracts_batch(abstracts_to_cache)
 
                 # Mark PMIDs not in response as not found
-                for pmid in batch:
-                    if pmid not in batch_result:
-                        self.cache.mark_not_found(pmid)
+                not_found = [pmid for pmid in batch if pmid not in batch_result]
+                self.cache.mark_not_found_batch(not_found)
+
+                # Only accumulate in memory if requested
+                if return_results:
+                    result.update(batch_result)
 
                 fetched_count += len(batch)
 
@@ -245,6 +245,25 @@ class NCBIClient:
                 # Continue with next batch
 
         return result
+
+    def fetch_abstracts_streaming(
+        self,
+        pmids: list[str],
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> int:
+        """Fetch abstracts without keeping them in memory.
+
+        Ideal for bulk downloads where you only care about populating the cache.
+
+        Args:
+            pmids: List of PMIDs.
+            progress_callback: Optional callback(fetched, total) for progress.
+
+        Returns:
+            Number of abstracts successfully fetched.
+        """
+        self.fetch_abstracts(pmids, progress_callback, return_results=False)
+        return self.cache.stats().total_abstracts
 
     def get_cached_abstracts(
         self,
