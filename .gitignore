@@ -94,7 +94,6 @@ data/
 *.fa
 
 # Model files
-models/
 *.pkl
 *.joblib
 *.h5
