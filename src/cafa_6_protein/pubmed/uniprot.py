@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from cafa_6_protein.models.schemas import UniProtClientStats
 from cafa_6_protein.pubmed.cache import PublicationCache
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,10 @@ def parse_uniprot_response(response_data: dict[str, Any]) -> dict[str, list[str]
     return result
 
 
+# UniProt API limits
+MAX_OR_CONDITIONS = 100  # UniProt search API limit
+
+
 class UniProtClient:
     """Client for fetching publication references from UniProt.
 
@@ -65,22 +71,27 @@ class UniProtClient:
 
     Attributes:
         cache: Publication cache for storing results.
-        batch_size: Number of proteins per API request.
+        batch_size: Number of proteins per API request (max 100 due to UniProt limit).
     """
 
     def __init__(
         self,
         cache_dir: Path | str,
-        batch_size: int = 500,
+        batch_size: int = 100,
         timeout: int = 30,
     ) -> None:
         """Initialize the UniProt client.
 
         Args:
             cache_dir: Directory for publication cache.
-            batch_size: Proteins per batch request.
+            batch_size: Proteins per batch request (max 100).
             timeout: Request timeout in seconds.
         """
+        if batch_size > MAX_OR_CONDITIONS:
+            logger.warning(
+                f"batch_size {batch_size} exceeds UniProt limit of {MAX_OR_CONDITIONS}, capping"
+            )
+            batch_size = MAX_OR_CONDITIONS
         self.cache = PublicationCache(cache_dir)
         self.batch_size = batch_size
         self.timeout = timeout
@@ -116,7 +127,7 @@ class UniProtClient:
         accession_clauses = [f"accession:{pid}" for pid in protein_ids]
         query = " OR ".join(accession_clauses)
 
-        params = {
+        params: dict[str, str | int] = {
             "query": query,
             "fields": "accession,lit_pubmed_id",
             "format": "json",
@@ -138,15 +149,18 @@ class UniProtClient:
     def fetch_publications(
         self,
         protein_ids: list[str],
-        progress_callback: callable | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+        save_interval: int = 1,
     ) -> dict[str, set[str]]:
         """Fetch publication references for proteins.
 
         Uses cache for already-fetched proteins, only queries API for missing.
+        Saves to disk after every `save_interval` batches to prevent data loss.
 
         Args:
             protein_ids: List of UniProt accessions.
             progress_callback: Optional callback(fetched, total) for progress.
+            save_interval: Save cache to disk every N batches (default: 1 = every batch).
 
         Returns:
             Dict mapping protein accessions to sets of PMIDs.
@@ -172,6 +186,7 @@ class UniProtClient:
 
         # Fetch in batches
         fetched_count = 0
+        batch_count = 0
         for i in range(0, len(missing), self.batch_size):
             batch = missing[i : i + self.batch_size]
 
@@ -190,6 +205,11 @@ class UniProtClient:
                         result[protein_id] = set()
 
                 fetched_count += len(batch)
+                batch_count += 1
+
+                # Save to disk at intervals to prevent data loss
+                if batch_count % save_interval == 0:
+                    self.cache.save()
 
                 if progress_callback:
                     progress_callback(fetched_count, len(missing))
@@ -223,10 +243,15 @@ class UniProtClient:
 
         return result
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self) -> UniProtClientStats:
         """Get cache statistics.
 
         Returns:
-            Dict with cache statistics.
+            UniProtClientStats with cache statistics.
         """
-        return self.cache.stats()
+        cache_stats = self.cache.stats()
+        return UniProtClientStats(
+            total_proteins=cache_stats.total_proteins,
+            total_pmids=cache_stats.total_pmids,
+            proteins_with_pubs=cache_stats.proteins_with_pubs,
+        )

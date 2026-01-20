@@ -12,6 +12,8 @@ from typing import Any
 
 import ahocorasick_rs
 
+from cafa_6_protein.models.schemas import GOTermInfo
+
 logger = logging.getLogger(__name__)
 
 # Pattern for explicit GO IDs
@@ -40,7 +42,7 @@ class GODictionary:
 
     def __init__(self) -> None:
         """Initialize empty dictionary."""
-        self.terms: dict[str, dict[str, Any]] = {}
+        self.terms: dict[str, GOTermInfo] = {}
         self.name_index: dict[str, set[str]] = {}
         self._automaton: ahocorasick_rs.AhoCorasick | None = None
         self._patterns: list[str] = []
@@ -130,11 +132,11 @@ class GODictionary:
             namespace: BP, MF, or CC.
             synonyms: Optional list of synonyms.
         """
-        self.terms[go_id] = {
-            "name": name,
-            "namespace": namespace,
-            "synonyms": synonyms or [],
-        }
+        self.terms[go_id] = GOTermInfo(
+            name=name,
+            namespace=namespace,
+            synonyms=synonyms or [],
+        )
 
         # Index by name
         normalized = name.lower()
@@ -161,14 +163,14 @@ class GODictionary:
         normalized = text.lower()
         return self.name_index.get(normalized, set())
 
-    def get_term(self, go_id: str) -> dict[str, Any] | None:
+    def get_term(self, go_id: str) -> GOTermInfo | None:
         """Get term info by GO ID.
 
         Args:
             go_id: GO ID to lookup.
 
         Returns:
-            Term info dict or None if not found.
+            GOTermInfo or None if not found.
         """
         return self.terms.get(go_id)
 
@@ -181,7 +183,7 @@ class GODictionary:
         Returns:
             Set of GO IDs in that namespace.
         """
-        return {go_id for go_id, info in self.terms.items() if info["namespace"] == namespace}
+        return {go_id for go_id, info in self.terms.items() if info.namespace == namespace}
 
     def get_all_searchable_terms(self) -> dict[str, set[str]]:
         """Get all searchable terms (names + synonyms) mapped to GO IDs.

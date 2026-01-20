@@ -77,9 +77,9 @@ class TestPublicationCache:
         cache.add_publications("P67890", ["22222222", "33333333"])
         
         stats = cache.stats()
-        assert stats["total_proteins"] == 2
-        assert stats["total_pmids"] == 3  # unique
-        assert stats["proteins_with_pubs"] == 2
+        assert stats.total_proteins == 2
+        assert stats.total_pmids == 3  # unique
+        assert stats.proteins_with_pubs == 2
 
     def test_add_protein_with_no_publications(self, tmp_path: Path) -> None:
         """Proteins with no publications are still tracked."""
@@ -90,8 +90,8 @@ class TestPublicationCache:
         assert cache.get_pmids("P12345") == set()
         
         stats = cache.stats()
-        assert stats["total_proteins"] == 1
-        assert stats["proteins_with_pubs"] == 0
+        assert stats.total_proteins == 1
+        assert stats.proteins_with_pubs == 0
 
 
 class TestAbstractCache:
@@ -117,11 +117,11 @@ class TestAbstractCache:
         
         result = cache.get_abstract("12345678")
         assert result is not None
-        assert result["pmid"] == "12345678"
-        assert result["title"] == "A study of protein function"
-        assert result["abstract"] == "We investigated the role of X in Y..."
-        assert result["pub_year"] == 2024
-        assert result["journal"] == "Nature"
+        assert result.pmid == "12345678"
+        assert result.title == "A study of protein function"
+        assert result.abstract == "We investigated the role of X in Y..."
+        assert result.pub_year == 2024
+        assert result.journal == "Nature"
 
     def test_get_missing_returns_none(self, tmp_path: Path) -> None:
         """Returns None for missing PMIDs."""
@@ -155,8 +155,8 @@ class TestAbstractCache:
         
         results = cache.get_abstracts(["11111111", "33333333", "99999999"])
         assert len(results) == 2
-        assert results["11111111"]["abstract"] == "Abstract one"
-        assert results["33333333"]["abstract"] == "Abstract three"
+        assert results["11111111"].abstract == "Abstract one"
+        assert results["33333333"].abstract == "Abstract three"
         assert "99999999" not in results
 
     def test_mark_not_found(self, tmp_path: Path) -> None:
@@ -177,9 +177,9 @@ class TestAbstractCache:
         cache.mark_not_found("33333333")
         
         stats = cache.stats()
-        assert stats["total_abstracts"] == 2
-        assert stats["total_processed"] == 3
-        assert stats["not_found"] == 1
+        assert stats.total_abstracts == 2
+        assert stats.total_processed == 3
+        assert stats.not_found == 1
 
     def test_persistence(self, tmp_path: Path) -> None:
         """Data persists across cache instances."""
@@ -190,7 +190,7 @@ class TestAbstractCache:
         cache2 = AbstractCache(tmp_path)
         result = cache2.get_abstract("12345678")
         assert result is not None
-        assert result["title"] == "Title"
+        assert result.title == "Title"
 
     def test_iterate_abstracts(self, tmp_path: Path) -> None:
         """Can iterate over all abstracts efficiently."""
@@ -201,5 +201,5 @@ class TestAbstractCache:
         
         abstracts = list(cache.iter_abstracts())
         assert len(abstracts) == 3
-        pmids = {a["pmid"] for a in abstracts}
+        pmids = {a.pmid for a in abstracts}
         assert pmids == {"11111111", "22222222", "33333333"}

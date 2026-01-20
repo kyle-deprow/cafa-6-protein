@@ -92,8 +92,8 @@ synonym: "programmed cell death" RELATED []
         
         info = dictionary.get_term("GO:0006915")
         assert info is not None
-        assert info["name"] == "apoptotic process"
-        assert info["namespace"] == "BP"
+        assert info.name == "apoptotic process"
+        assert info.namespace == "BP"
 
     def test_filter_by_namespace(self) -> None:
         """Filter terms by namespace."""

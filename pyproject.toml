@@ -20,6 +20,9 @@ dependencies = [
     "cafaeval",
     "pyarrow>=23.0.0",
     "ahocorasick-rs>=1.0.3",
+    "faiss-cpu>=1.7.0",
+    "requests>=2.31.0",
+    "pydantic>=2.0.0",
 ]
 
 [project.scripts]
@@ -82,8 +85,18 @@ check_untyped_defs = true
 module = [
     "Bio.*",
     "sklearn.*",
+    "typer.*",
+    "cafaeval.*",
+    "obonet.*",
+    "networkx.*",
+    "faiss.*",
+    "ahocorasick.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cafa_6_protein.cli"
+disallow_untyped_decorators = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

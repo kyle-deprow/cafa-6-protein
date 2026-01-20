@@ -11,9 +11,15 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pandas as pd
+
+from cafa_6_protein.models.schemas import (
+    AbstractCacheStats,
+    AbstractData,
+    PublicationCacheStats,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -57,7 +63,7 @@ class PublicationCache:
         try:
             df = pd.read_parquet(self._cache_path)
             for protein_id, group in df.groupby("protein_id"):
-                self._protein_to_pmids[protein_id] = set(group["pmid"].dropna())
+                self._protein_to_pmids[str(protein_id)] = set(group["pmid"].dropna())
         except Exception:
             # Corrupted cache, start fresh
             self._protein_to_pmids = {}
@@ -68,7 +74,7 @@ class PublicationCache:
             return
 
         # Build DataFrame
-        rows = []
+        rows: list[dict[str, str | None]] = []
         for protein_id, pmids in self._protein_to_pmids.items():
             if pmids:
                 for pmid in pmids:
@@ -141,18 +147,18 @@ class PublicationCache:
         """
         return [p for p in protein_ids if p not in self._protein_to_pmids]
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self) -> PublicationCacheStats:
         """Get cache statistics.
 
         Returns:
-            Dict with cache statistics.
+            PublicationCacheStats with cache statistics.
         """
         proteins_with_pubs = sum(1 for pmids in self._protein_to_pmids.values() if pmids)
-        return {
-            "total_proteins": len(self._protein_to_pmids),
-            "total_pmids": len(self.get_all_pmids()),
-            "proteins_with_pubs": proteins_with_pubs,
-        }
+        return PublicationCacheStats(
+            total_proteins=len(self._protein_to_pmids),
+            total_pmids=len(self.get_all_pmids()),
+            proteins_with_pubs=proteins_with_pubs,
+        )
 
 
 class AbstractCache:
@@ -247,14 +253,14 @@ class AbstractCache:
         )
         conn.commit()
 
-    def get_abstract(self, pmid: str) -> dict[str, Any] | None:
+    def get_abstract(self, pmid: str) -> AbstractData | None:
         """Get abstract data for a PMID.
 
         Args:
             pmid: PubMed ID.
 
         Returns:
-            Dict with abstract data, or None if not found.
+            AbstractData with abstract data, or None if not found.
         """
         conn = self._get_conn()
         row = conn.execute("SELECT * FROM abstracts WHERE pmid = ?", (pmid,)).fetchone()
@@ -262,16 +268,16 @@ class AbstractCache:
         if row is None:
             return None
 
-        return dict(row)
+        return AbstractData.from_db_row(dict(row))
 
-    def get_abstracts(self, pmids: list[str]) -> dict[str, dict[str, Any]]:
+    def get_abstracts(self, pmids: list[str]) -> dict[str, AbstractData]:
         """Get multiple abstracts at once.
 
         Args:
             pmids: List of PubMed IDs.
 
         Returns:
-            Dict mapping PMIDs to abstract data (missing PMIDs excluded).
+            Dict mapping PMIDs to AbstractData (missing PMIDs excluded).
         """
         if not pmids:
             return {}
@@ -283,7 +289,7 @@ class AbstractCache:
             pmids,
         ).fetchall()
 
-        return {row["pmid"]: dict(row) for row in rows}
+        return {row["pmid"]: AbstractData.from_db_row(dict(row)) for row in rows}
 
     def has_pmid(self, pmid: str) -> bool:
         """Check if PMID has an abstract in cache.
@@ -324,13 +330,21 @@ class AbstractCache:
             return []
 
         conn = self._get_conn()
-        placeholders = ",".join("?" * len(pmids))
-        rows = conn.execute(
-            f"SELECT pmid FROM fetch_status WHERE pmid IN ({placeholders})",
-            pmids,
-        ).fetchall()
 
-        processed = {row["pmid"] for row in rows}
+        # SQLite has a limit on query variables (typically 999)
+        # Batch the query to avoid "too many SQL variables" error
+        batch_size = 900
+        processed: set[str] = set()
+
+        for i in range(0, len(pmids), batch_size):
+            batch = pmids[i : i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            rows = conn.execute(
+                f"SELECT pmid FROM fetch_status WHERE pmid IN ({placeholders})",
+                batch,
+            ).fetchall()
+            processed.update(row["pmid"] for row in rows)
+
         return [p for p in pmids if p not in processed]
 
     def mark_not_found(self, pmid: str, error_msg: str | None = None) -> None:
@@ -350,11 +364,11 @@ class AbstractCache:
         )
         conn.commit()
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self) -> AbstractCacheStats:
         """Get cache statistics.
 
         Returns:
-            Dict with cache statistics.
+            AbstractCacheStats with cache statistics.
         """
         conn = self._get_conn()
 
@@ -366,23 +380,23 @@ class AbstractCache:
             "SELECT COUNT(*) FROM fetch_status WHERE status = 'not_found'"
         ).fetchone()[0]
 
-        return {
-            "total_abstracts": abstract_count,
-            "total_processed": processed_count,
-            "not_found": not_found_count,
-        }
+        return AbstractCacheStats(
+            total_abstracts=abstract_count,
+            total_processed=processed_count,
+            not_found=not_found_count,
+        )
 
-    def iter_abstracts(self) -> Iterator[dict[str, Any]]:
+    def iter_abstracts(self) -> Iterator[AbstractData]:
         """Iterate over all abstracts.
 
         Yields:
-            Dict with abstract data for each cached abstract.
+            AbstractData for each cached abstract.
         """
         conn = self._get_conn()
         cursor = conn.execute("SELECT * FROM abstracts")
 
         for row in cursor:
-            yield dict(row)
+            yield AbstractData.from_db_row(dict(row))
 
     def close(self) -> None:
         """Close database connection."""

@@ -9,13 +9,15 @@ import contextlib
 import logging
 import time
 import xml.etree.ElementTree as ET
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import requests
 
+from cafa_6_protein.models.schemas import AbstractData, NCBIClientStats
 from cafa_6_protein.pubmed.cache import AbstractCache
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -28,16 +30,16 @@ REQUESTS_PER_SECOND = 3
 MIN_REQUEST_INTERVAL = 1.0 / REQUESTS_PER_SECOND
 
 
-def parse_efetch_response(xml_text: str) -> dict[str, dict[str, Any]]:
+def parse_efetch_response(xml_text: str) -> dict[str, AbstractData]:
     """Parse NCBI E-fetch XML response to extract abstracts.
 
     Args:
         xml_text: XML response from efetch.
 
     Returns:
-        Dict mapping PMIDs to dicts with 'title', 'abstract', 'pub_year', 'journal'.
+        Dict mapping PMIDs to AbstractData.
     """
-    result: dict[str, dict[str, Any]] = {}
+    result: dict[str, AbstractData] = {}
 
     try:
         root = ET.fromstring(xml_text)
@@ -83,12 +85,13 @@ def parse_efetch_response(xml_text: str) -> dict[str, dict[str, Any]]:
         if journal_elem is not None and journal_elem.text:
             journal = journal_elem.text
 
-        result[pmid] = {
-            "title": title,
-            "abstract": abstract,
-            "pub_year": pub_year,
-            "journal": journal,
-        }
+        result[pmid] = AbstractData(
+            pmid=pmid,
+            title=title,
+            abstract=abstract,
+            pub_year=pub_year,
+            journal=journal,
+        )
 
     return result
 
@@ -134,14 +137,14 @@ class NCBIClient:
             time.sleep(interval - elapsed)
         self._last_request_time = time.time()
 
-    def _fetch_batch(self, pmids: list[str]) -> dict[str, dict[str, Any]]:
+    def _fetch_batch(self, pmids: list[str]) -> dict[str, AbstractData]:
         """Fetch abstracts for a batch of PMIDs.
 
         Args:
             pmids: List of PMIDs to query.
 
         Returns:
-            Dict mapping PMIDs to dicts with 'title', 'abstract', etc.
+            Dict mapping PMIDs to AbstractData.
 
         Raises:
             requests.RequestException: On API errors.
@@ -151,7 +154,7 @@ class NCBIClient:
 
         self._rate_limit()
 
-        params: dict[str, Any] = {
+        params: dict[str, str] = {
             "db": "pubmed",
             "id": ",".join(pmids),
             "rettype": "xml",
@@ -175,8 +178,8 @@ class NCBIClient:
     def fetch_abstracts(
         self,
         pmids: list[str],
-        progress_callback: callable | None = None,
-    ) -> dict[str, dict[str, Any]]:
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, AbstractData]:
         """Fetch abstracts for PMIDs.
 
         Uses cache for already-fetched PMIDs, only queries API for missing.
@@ -186,12 +189,12 @@ class NCBIClient:
             progress_callback: Optional callback(fetched, total) for progress.
 
         Returns:
-            Dict mapping PMIDs to dicts with 'title', 'abstract', etc.
+            Dict mapping PMIDs to AbstractData.
         """
         if not pmids:
             return {}
 
-        result: dict[str, dict[str, str]] = {}
+        result: dict[str, AbstractData] = {}
 
         # Get cached abstracts
         for pmid in pmids:
@@ -220,10 +223,10 @@ class NCBIClient:
                 for pmid, data in batch_result.items():
                     self.cache.add_abstract(
                         pmid,
-                        data["title"],
-                        data["abstract"],
-                        data.get("pub_year"),
-                        data.get("journal"),
+                        data.title,
+                        data.abstract,
+                        data.pub_year,
+                        data.journal,
                     )
                     result[pmid] = data
 
@@ -246,16 +249,16 @@ class NCBIClient:
     def get_cached_abstracts(
         self,
         pmids: list[str],
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, AbstractData]:
         """Get abstracts from cache only (no API calls).
 
         Args:
             pmids: List of PMIDs.
 
         Returns:
-            Dict mapping cached PMIDs to dicts with 'title', 'abstract', etc.
+            Dict mapping cached PMIDs to AbstractData.
         """
-        result: dict[str, dict[str, Any]] = {}
+        result: dict[str, AbstractData] = {}
 
         for pmid in pmids:
             cached = self.cache.get_abstract(pmid)
@@ -264,10 +267,15 @@ class NCBIClient:
 
         return result
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self) -> NCBIClientStats:
         """Get cache statistics.
 
         Returns:
-            Dict with cache statistics.
+            NCBIClientStats with cache statistics.
         """
-        return self.cache.stats()
+        cache_stats = self.cache.stats()
+        return NCBIClientStats(
+            total_abstracts=cache_stats.total_abstracts,
+            total_processed=cache_stats.total_processed,
+            not_found=cache_stats.not_found,
+        )

@@ -212,11 +212,51 @@ A simple baseline that achieves ~0.269 on public LB without any ML:
 
 ---
 
+## Implementation Progress
+
+### Phase 1: Baseline Infrastructure ✅
+- [x] Data loaders for FASTA, TSV, and OBO files
+- [x] Evaluation metrics (weighted F1, precision, recall)
+- [x] Frequency baseline predictor
+- [x] kNN predictor with distance-weighted scoring
+- [x] Ontology utilities (ancestor propagation, GO roots)
+- [x] Ensemble blending predictor
+- [x] CLI with commands: `info`, `baseline`, `cv`, `validate`
+- [x] 127 tests passing
+
+**Baseline CV Results** (5-fold):
+- BP F-max: 0.22
+- CC F-max: 0.59
+- MF F-max: 0.54
+
+### Phase 2: PubMed Mining Pipeline ✅
+- [x] Publication cache (Parquet format for protein→PMID mappings)
+- [x] Abstract cache (SQLite for PMID→abstract text)
+- [x] UniProt API client for fetching protein publications
+- [x] NCBI E-utilities client for fetching PubMed abstracts
+- [x] GO dictionary from OBO with Aho-Corasick matching
+- [x] GO term extractor from text
+- [x] Full e2e pipeline tested
+
+**Next Steps**:
+- [ ] Fetch publications for all training proteins
+- [ ] Build text features (TF-IDF of abstracts)
+- [ ] Integrate with baseline predictors
+
+### Phase 3: PLM Embeddings (Planned)
+- [ ] Download pre-computed T5 embeddings from UniProt
+- [ ] ESM2 embeddings via API or pre-computed
+- [ ] MLP classifier with embedding features
+- [ ] Ensemble with baseline predictors
+
+---
+
 ## Next Steps
 
-1. [ ] Set up baseline with pre-computed T5 embeddings
-2. [ ] Implement proper time-shifted validation
-3. [ ] Add GOA UniProt mapping as baseline
-4. [ ] Build ensemble of multiple PLM embeddings
-5. [ ] Experiment with taxon constraints and parent-child propagation
-6. [ ] Explore multi-modal features (text, structure)
+1. [x] Set up baseline with frequency predictor
+2. [ ] Set up baseline with pre-computed T5 embeddings
+3. [ ] Implement proper time-shifted validation
+4. [x] Add PubMed text mining infrastructure
+5. [ ] Build ensemble of multiple PLM embeddings
+6. [ ] Experiment with taxon constraints and parent-child propagation
+7. [ ] Explore multi-modal features (text, structure)

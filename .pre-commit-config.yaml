@@ -7,3 +7,14 @@ repos:
         files: ^src/
       - id: ruff-format
         files: ^src/
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        files: ^src/
+        args: [--ignore-missing-imports]
+        additional_dependencies:
+          - pydantic>=2.0.0
+          - pandas-stubs>=2.1.0
+          - types-requests>=2.31.0

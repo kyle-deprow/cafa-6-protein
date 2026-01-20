@@ -32,8 +32,8 @@ class TestParseEfetchResponse:
         
         assert len(result) == 1
         assert "12345678" in result
-        assert result["12345678"]["title"] == "Test Article Title"
-        assert result["12345678"]["abstract"] == "This is the abstract text."
+        assert result["12345678"].title == "Test Article Title"
+        assert result["12345678"].abstract == "This is the abstract text."
 
     def test_parse_multiple_abstract_sections(self) -> None:
         """Parse structured abstract with multiple sections."""
@@ -58,7 +58,7 @@ class TestParseEfetchResponse:
         result = parse_efetch_response(xml_response)
         
         assert "12345678" in result
-        abstract = result["12345678"]["abstract"]
+        abstract = result["12345678"].abstract
         assert "Background info." in abstract
         assert "Methods used." in abstract
         assert "Results found." in abstract
@@ -81,8 +81,8 @@ class TestParseEfetchResponse:
         result = parse_efetch_response(xml_response)
         
         assert "12345678" in result
-        assert result["12345678"]["title"] == "No Abstract Article"
-        assert result["12345678"]["abstract"] == ""
+        assert result["12345678"].title == "No Abstract Article"
+        assert result["12345678"].abstract == ""
 
     def test_parse_multiple_articles(self) -> None:
         """Parse response with multiple articles."""
@@ -115,8 +115,8 @@ class TestParseEfetchResponse:
         result = parse_efetch_response(xml_response)
         
         assert len(result) == 2
-        assert result["11111111"]["abstract"] == "First abstract."
-        assert result["22222222"]["abstract"] == "Second abstract."
+        assert result["11111111"].abstract == "First abstract."
+        assert result["22222222"].abstract == "Second abstract."
 
     def test_parse_empty_response(self) -> None:
         """Parse empty PubmedArticleSet."""
@@ -148,7 +148,7 @@ class TestNCBIClient:
         result = client.fetch_abstracts(["12345"])
         
         assert "12345" in result
-        assert result["12345"]["abstract"] == "Cached abstract"
+        assert result["12345"].abstract == "Cached abstract"
 
     def test_fetch_only_missing_pmids(self, tmp_path: Path) -> None:
         """Fetch only queries API for uncached PMIDs."""
@@ -212,7 +212,7 @@ class TestNCBIClient:
         # Verify saved to cache
         assert client.cache.has_pmid("12345")
         cached = client.cache.get_abstract("12345")
-        assert cached["abstract"] == "Test abstract."
+        assert cached.abstract == "Test abstract."
 
     def test_fetch_marks_not_found(self, tmp_path: Path) -> None:
         """PMIDs not in response are marked as not found."""

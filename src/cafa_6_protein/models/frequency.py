@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 class FrequencyBaseline:
@@ -62,7 +62,8 @@ class FrequencyBaseline:
         term_counts = annotations.groupby("go_term")["protein_id"].nunique()
 
         # Compute frequencies
-        self.term_frequencies = (term_counts / n_proteins).to_dict()
+        freq_dict = (term_counts / n_proteins).to_dict()
+        self.term_frequencies = {str(k): float(v) for k, v in freq_dict.items()}
 
         # Compute scores
         if ia_weights is not None:
@@ -201,7 +202,7 @@ class FrequencyBaseline:
         protein_ids: list[str],
         output_path: Path | str,
         batch_size: int = 10_000,
-        progress_callback: callable | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> int:
         """Write predictions directly to file in batches.
 
